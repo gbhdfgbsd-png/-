@@ -854,3 +854,784 @@ Meta-Principles（≤5条，最高优先级，极少变动）
 ---
 
 *文档结束。Layer 4-6待后续设计会话补充。*
+
+
+
+---
+
+## 深化补充 | 2026-05-13（第二次设计会话）
+
+> 以下内容来自第二次设计会话，逐点打穿了Layer 4-6的完整设计、4个已识别的深化问题、2个未完成的表达点、以及1个新增的系统自主学习机制。
+
+---
+
+### 补充点1：Layer 4 张力检测器完整设计 → 关联：Layer 4
+
+#### 核心定位校准
+
+张力不是原则间的逻辑矛盾——**张力是行为与意图之间的裂缝在特定时间窗口内的累积。**
+
+两条原则文本上矛盾不一定产生张力（可能从没在同一场景里被同时调用过）。两条看似无关的原则，可能因为真实行为暴露了隐藏的取舍关系而产生剧烈张力。
+
+张力检测器的输入不是"两条原则的文本"，而是"一个行为序列 + 一条规范性原则 + 时间窗口"。
+
+#### 张力的精确定义
+
+```
+张力 = 在时间窗口T内，你的实际决策模式（描述性）与你声称希望遵循的标准（规范性）
+       之间的累积偏离，达到了你自己设定的敏感度阈值。
+```
+
+关键词：
+- **累积偏离**：单次不遵循不是张力，是例外。系统抓趋势不抓个案。
+- **时间窗口**：张力有时效性。3个月前偏离5次但最近2个月完美遵循——张力已消解。
+- **敏感度由你设定**：不同原则的可容忍偏离度不同。
+
+#### 张力的四种来源类型
+
+| 类型 | 定义 | 检测方式 | 示例 |
+|------|------|---------|------|
+| 行为-意图张力 | DP-X与PP-Y指向相反 | 模式引擎输出vs原则库对比 | DP:"焦虑时快速决策" vs PP:"不在情绪波动下做重大决策" |
+| 频率-声明张力 | 某PP声称高频使用但实际使用率低 | utilization_rate计算 | PP-003被触发12次，实际遵循4次 |
+| 结果-信念张力 | 某PP一直遵循但结果持续为负 | validation负向累积 | 一直选长期积累但连续3次方向选错 |
+| 演化-锚定张力 | 行为已相变但规范性原则还锚定旧模式 | 相变检测+原则最后更新时间 | 毕业后行为转向执行力但原则还在说"深度思考优先" |
+
+**第四种"演化-锚定张力"最有价值也最难检测**——揭示的不是"你没做到"，而是"你已经变了但操作系统没跟上"。这是原则该更新的信号，不是你该被纠正的信号。
+
+#### 数据结构
+
+```yaml
+tension_entry:
+  id: "TEN-017"
+  detected_at: "时间戳"
+  last_updated: "时间戳"
+  type: "behavior_intent|frequency_claim|outcome_belief|evolution_anchor"
+
+  descriptive_side:
+    principle_id: "DP-008"
+    statement: "描述性侧表述"
+    evidence_window:
+      start: "日期"
+      end: "日期"
+      relevant_decisions: ["D-045", "D-051", "D-053"]
+      direction_summary: "在5次相关决策中，4次选择了快速执行"
+
+  prescriptive_side:
+    principle_id: "PP-007"
+    statement: "规范性侧表述"
+    expected_behavior: "重大决策前至少等待24小时冷静期"
+
+  measurement:
+    deviation_rate: 0.80
+    time_window_days: 30
+    sample_size: 5
+    trend: "widening|stable|narrowing"
+    severity: "mild|moderate|significant|critical"
+    # mild: 偏离率<40%或样本<3
+    # moderate: 40-60%
+    # significant: 60-80%
+    # critical: >80%且样本≥5且原则tier≤2
+
+  context_analysis:
+    common_triggers: ["时间压力高", "stakes判断为medium以下"]
+    emotional_correlation: "anxiety → 偏离概率+40%"
+    outcome_when_deviated:
+      positive: 2
+      negative: 1
+      neutral: 1
+    outcome_when_followed:
+      positive: 1
+      negative: 0
+      neutral: 0
+
+  diagnosis:
+    hypothesis: "execution_gap|principle_outdated|boundary_missing|context_dependent"
+    confidence: "high|medium|low"
+    reasoning: "诊断推理过程"
+
+  user_response:
+    acknowledged: false
+    response_type: null
+    # accept_tension → 想缩小差距
+    # accept_behavior → 原则该更新
+    # add_boundary → 加例外条件
+    # dismiss → 误检
+    # defer → 以后处理
+    action_taken: null
+
+  lifecycle:
+    status: "active|acknowledged|resolving|resolved|recurring|dismissed"
+    resolution_history: []
+    recurrence_count: 0
+```
+
+#### 每条原则的敏感度设置（新增字段）
+
+```yaml
+# 在principle_entry中新增
+tension_sensitivity:
+  threshold: 0.40       # 偏离率超过此值触发张力报告
+  min_sample: 3         # 至少N条相关决策才开始计算
+  window_days: 30       # 滑动窗口
+  cooldown_days: 14     # 同一张力报告最短间隔（防骚扰）
+```
+
+示例：
+- "永远保持3个月现金储备"：threshold=0.05（几乎零容忍）
+- "优先选有复利的学习方向"：threshold=0.50（判断空间大）
+- "不在情绪波动下做重大决策"：threshold=0.30（重要但不可能100%）
+
+#### 检测引擎运行逻辑
+
+| 触发 | 做什么 | 延迟 |
+|------|--------|------|
+| 每条新决策写入 | 即时：是否偏离某PP？写入violation_buffer | 不立即报告单次偏离 |
+| 偏离累积达阈值 | 生成张力报告 | 检测到立即生成，推送受不打扰规则约束 |
+| 每周全量扫描 | 遍历所有active PP计算遵循率 | 周报呈现 |
+| 模式引擎输出新confirmed模式 | 与所有PP对比检查新张力 | 随模式通知一起 |
+| 原则形成/修改 | 新PP生效时回扫最近30天 | 原则确认后立即 |
+
+即时扫描逻辑：
+```
+新决策D-063写入
+  → 提取dimensions + chosen_option + emotional_signals
+  → 匹配所有PP的scenario_triggers
+  → 命中PP-007 → 检查：情绪高波动？stakes≥medium？
+  → 判定偏离 → 写入violation_buffer
+  → 检查buffer：30天窗口内偏离率 = 4/5 = 0.80 > threshold(0.40)
+  → 触发张力报告生成
+```
+
+#### 张力报告呈现设计
+
+**核心原则：不是批评，是镜子。绝对禁止暗含"你做错了"的表述。**
+
+```
+⚡ 张力报告 TEN-017 | 日期
+
+📐 你声称的标准：
+PP-007 "不在焦虑/情绪波动下做重大决策"
+
+▪ 你最近30天的实际行为：
+5次相关决策中，4次在情绪高波动状态下做出
+偏离率：80% | 趋势：扩大
+
+🔬 模式分析：
+· 4次偏离中3次time_pressure=high
+· 偏离后结果：2正向, 1负向, 1待定
+· 1次遵循（D-049）特征：stakes=critical, 主动延迟24小时
+
+🤔 系统假设（不是结论）：
+你可能隐含地区分了"真正重大"和"自以为重大但可快速判断的"。
+PP-007可能需要边界条件："stakes≥high时适用，medium以下允许快速判断"。
+
+你怎么看？
+[🎯 想缩小差距] [🔄 原则该更新] [📐 加边界条件] [✗ 误检] [⏰ 以后再说]
+```
+
+#### 用户响应后系统动作
+
+| 选择 | 动作 |
+|------|------|
+| 想缩小差距 | 进入行动计划：确认触发场景→设计干预点→设跟踪窗口 |
+| 原则该更新 | 触发修订流程：呈现当前→你给新表述→系统检查关系→确认更新 |
+| 加边界条件 | 在boundaries.edge_cases新增→回测数据→确认 |
+| 误检 | 记录原因→调整trigger/检测逻辑→连续2次误检→暂停该PP张力检测 |
+| 以后再说 | 保持active→设defer_until→到期再推 |
+
+#### 张力生命周期
+
+```
+检测到偏离累积 → active → 推送用户 → 用户响应：
+  ├── accept_tension → resolving → 跟踪 → 偏离率下降 → resolved
+  ├── accept_behavior → 原则更新 → resolved(principle_updated)
+  ├── add_boundary → 原则边界更新 → 重新计算 → 可能消失
+  ├── dismiss → dismissed（不再检测，除非手动恢复）
+  └── defer → deferred → 到期重推
+
+resolved后再次出现 → recurrence_count+1
+recurrence_count≥3 → chronic_tension
+  → "这个张力反复出现，可能不是执行力问题，可能是更深层价值观冲突。
+     是否进入深度探索模式？"
+```
+
+#### 张力健康度指标
+
+系统不应该让张力=0成为目标。健康的张力水平是2-4条active。
+
+```yaml
+tension_health:
+  active_tensions: 3
+  assessment: "healthy"
+  # healthy: 2-4条active，覆盖不同tier
+  # too_low: 0-1条 → "规范性原则可能需要升级"
+  # too_high: 5+条 → "标准太多不现实，建议优先处理top 2"
+  # chronic: ≥2条recurrence≥3 → "深层价值观冲突需解决"
+```
+
+#### 边界条件
+
+| 场景 | 处理 |
+|------|------|
+| 新原则刚创建没数据 | 不检测。min_sample未达到前静默 |
+| 用户连续dismiss多条 | 不评判。月报呈现"本月dismiss了5条"作为元数据 |
+| 所有张力都是同一条PP | 该PP本身可能有问题，建议深度探索审视 |
+| 报告太频繁 | cooldown保护+severity分级（mild不推，moderate周报呈现，significant+即时） |
+| 描述性原则还是emerging | 不与PP做张力对比，只有confirmed的DP才进入 |
+| 特殊期（搬家/考试周） | 可手动设"张力检测静默期"，数据照记事后可回看 |
+
+#### 层间接口
+
+| 方向 | 传什么 |
+|------|--------|
+| L0→L4 | 每条新决策（即时扫描） |
+| L2→L4 | 新confirmed描述性模式/强度变化 |
+| L3→L4 | 原则boundaries/sensitivity设置 |
+| L4→L3 | 原则修订建议 |
+| L4→L5 | active张力列表（决策辅助盲区提醒） |
+| L4→L6 | 张力生命周期事件（演化追踪核心事件源） |
+| L4→交互层 | 张力报告推送 |
+
+---
+
+
+
+### 补充点2：Layer 5 决策辅助层完整设计 → 关联：Layer 5 + 深化点①④
+
+#### 为什么最难设计
+
+Layer 0-4是记录和分析（处理已发生的事）。Layer 5是唯一要在**决策发生之前**实时工作的模块。约束组合最极端：时间压力、多原则整合、不能给结论、要给对手盘。
+
+**核心难题：多条原则被同时调用时，怎么从"列举每条原则分别怎么说"升级到"整合出一个有结构的正反论证"？**
+
+#### 推理引擎四阶段架构
+
+```
+用户输入场景 → Phase 1:场景解构 → Phase 2:原则召回 → Phase 3:论证合成 → Phase 4:盲区扫描
+```
+
+#### Phase 1: 场景解构（含时间维度设计——回应深化点④）
+
+```yaml
+scene_decomposition:
+  consultation_id: "C-012"
+  raw_input: "用户原始描述"
+
+  choice_structure:
+    type: "binary|multi_option|spectrum|meta_decision"
+    options:
+      - id: "opt_A"
+        description: "选项描述"
+        implied_tradeoffs: ["放弃什么", "获得什么"]
+
+  dimensions_involved:
+    - dimension: "AX-001"
+      relevance: "high"
+
+  constraints:
+    time_pressure: "high|medium|low|none"
+    reversibility: "high|medium|low"
+    stakes: "trivial|low|medium|high|critical"
+    information_completeness: "sufficient|partial|severely_lacking"
+
+  # 时间尺度判定（深化点④核心）
+  time_horizon:
+    primary: "immediate|days|weeks|months|years"
+    secondary_effects: []
+    horizon_conflicts:
+      - short_term_favors: "opt_A"
+        long_term_favors: "opt_B"
+        crossover_point: "描述"
+```
+
+**时间尺度升维机制：**
+
+当系统检测到你在短时间内反复就同一类微决策来咨询时（比如"今晚加不加班"连续3天出现），系统提示：
+
+> "你问的是今晚要不要干，但过去3天你每晚都在做这个决策。也许你真正需要决定的是：这周/这个月的工作节奏标准是什么？"
+> [继续当前决策] [切换到策略级讨论]
+
+系统不强制升维，只指出可能性。
+
+#### Phase 2: 原则召回——三层漏斗
+
+```
+Layer 1 粗筛：维度匹配+trigger语义匹配 → 候选集（15-20条）
+Layer 2 排序：relevance_score = 维度匹配×0.3 + trigger匹配×0.3 + tier×0.2 + validation×0.1 + recency×0.1
+Layer 3 对抗性筛选：
+  → top N中如果全指向同一选项 → 强制拉入反方向原则
+  → 没有反方向原则 → 从试金石库未验证假说中搜索
+  → 连假说都没有 → 标记"原则体系在该方向有盲区"
+  → 输出：正方原则集 + 反方原则集
+```
+
+同时召回：相关假说（低权重参考）、历史类比（决策日志）、活跃张力（盲区提醒）、退役原则（幽灵提醒）。
+
+#### Phase 3: 论证合成（回应深化点①——多原则整合）
+
+**60分方案（列举式）：** 列出每条原则说什么，最后说"综合来看倾向A"。用户看完还得自己整合。
+
+**90分方案（论证链合成）：** 把多条原则串成推理链，每一步标注依赖哪条原则+confidence。
+
+```yaml
+argument_synthesis:
+  pro_argument:
+    conclusion: "倾向选项A"
+    reasoning_chain:
+      - step: 1
+        claim: "当前经济满足生存安全线"
+        grounded_in: "PP-003.decision_rule.step_1"
+        evidence: "现金储备=4.2个月"
+        confidence: "high"
+      - step: 2
+        claim: "生存条件满足→默认选长期积累"
+        grounded_in: "PP-003.statement"
+        confidence: "high"
+      - step: 3
+        claim: "选项A的长期属性更强"
+        grounded_in: "场景分析"
+        confidence: "medium"  # 因为"是否真有复利"需要判断
+    overall_confidence: "medium-high"
+    weakest_link: "Step 3——复利判断是判断而非事实"
+
+  contra_argument:
+    conclusion: "为什么可能应该选B"
+    reasoning_chain:
+      - step: 1
+        claim: "PP-003前提'方向有复利效应'——你没有该领域先例数据"
+        grounded_in: "PP-003.key_assumptions[1]"
+        confidence: "medium"
+      - step: 2
+        claim: "PP-008说可逆决策快执行——B可逆性高"
+        grounded_in: "PP-008"
+        confidence: "high"
+      - step: 3
+        claim: "历史D-028：同样'选长期'但方向错误导致3月浪费"
+        grounded_in: "D-028.outcome=negative"
+        confidence: "medium"
+    strongest_point: "方向不确定时可逆性权重应上升"
+```
+
+**论证链合成算法：**
+1. 识别锚点（tier最高+validation最强）
+2. 从锚点的decision_rule逐步检查前提满足
+3. 满足的前提=支撑点，不满足/不确定的=攻击点（给反方）
+4. 连接支撑原则扩展正面链
+5. 反方锚点挑战正方weakest_link + 补充历史反例
+6. 每步标注confidence+grounded_in
+
+#### Phase 4: 盲区扫描
+
+```yaml
+blind_spot_scan:
+  missing_dimensions:
+    - dimension: "relationship_impact"
+      note: "未提到对伴侣影响"
+  cognitive_bias_alerts:
+    - bias: "sunk_cost"
+      trigger: "你提到'已经投了2周'"
+  information_gaps:
+    - gap: "A的复利机制未具体描述"
+  active_tension_reminder:
+    - tension_id: "TEN-017"
+      relevance: "你正在用PP-007但偏离率80%"
+  retired_principle_ghost:
+    - "你曾有'项目开始不轻易放弃'原则，因D-028退役"
+  # 新增（来自系统自学习SU-014）：
+  pre_mortem_analysis:
+    - "假设选了A且3个月后失败，最可能的3个原因：①方向判断依据不足 ②执行力不够 ③市场环境变化"
+    - trigger_condition: "stakes≥high时启动"
+```
+
+#### Quick_test设计标准（回应深化点①）
+
+好的quick_test满足三条件：
+1. **一个问题**（不是三步判断）
+2. **答案是binary的**（是/否）
+3. **调用情绪直觉而非理性分析**（压力下理性带宽不够）
+
+示例：
+- ✓ "如果最尊敬的人站旁边看你做决定，你还选这个吗？"
+- ✓ "选了短期收入，3个月后的你会骂现在的你吗？"
+- ✗ "评估一下长期NPV" → 压力下算不了
+
+**本质：把复杂推理压缩成5秒内回答的情绪探针。不需要"正确"，只需要把你从自动驾驶中拽出来一秒。**
+
+#### 决策后闭环
+
+决定后 → 写入L0 → 标记调用了哪些原则+是否遵循正面论证 → 设置回填 → 如果选了对手盘方向→特殊标记against_primary_recommendation（原则可能需要修正的信号）→ L4获得新数据 → L6记录事件
+
+#### 边界条件
+
+| 场景 | 处理 |
+|------|------|
+| 原则库<10条 | 降级：只做列举+历史类比+盲区扫描 |
+| 场景太模糊 | 不硬解构，反问："能描述为'A还是B'吗？否则可能需要深度探索模式" |
+| 所有原则指同一方向 | 明确告知"体系一致≠一定正确"，对手盘从假说和反例中构建 |
+| 用户情绪明显不稳 | 优先触发PP-007："建议延后24小时" |
+| 时间极紧（5分钟内要回复） | 极简模式：锚点原则+quick_test+最大风险点 |
+
+---
+
+
+
+### 补充点3：Layer 6 演化追踪层完整设计 → 关联：Layer 6
+
+#### 核心定位
+
+不是"历史记录"——是"操作系统的git history + 趋势预测 + 身份内核检测"。
+
+三大功能模块：
+- **模块A 演化叙事引擎**："你变了什么"——把变化事件串成有因果关系的叙事
+- **模块B 趋势预测引擎**："你即将变什么"——在原则被正式修改前发现征兆
+- **模块C 身份内核检测器**："什么没变"——在所有变化中锚定"你是谁"的不变内核
+
+#### 核心数据单位：演化事件
+
+```yaml
+evolution_event:
+  id: "EV-089"
+  timestamp: "时间戳"
+  event_type: "principle_created|principle_updated|principle_retired|
+               principle_promoted|tension_detected|tension_resolved|
+               pattern_emerged|pattern_dissolved|phase_shift|
+               hypothesis_promoted|hypothesis_retired|
+               meta_principle_modified|validation_reversal|system_upgrade"
+  subject:
+    type: "principle|pattern|hypothesis|tension|system"
+    id: "PP-003"
+    before_state: "变化前快照"
+    after_state: "变化后快照"
+    delta_summary: "一句话描述"
+  cause:
+    type: "evidence_accumulation|single_critical_event|user_reflection|
+           external_life_change|gradual_drift|conflict_resolution"
+    triggering_decisions: ["D-045"]
+    description: "描述"
+  significance:
+    level: "minor|moderate|major|transformative"
+    affects_tier: 3
+    cascade_effects: []
+  meta_cognition:
+    change_direction: "growth|regression|lateral_shift|deepening|simplification"
+    user_confirmed_direction: null
+```
+
+#### 模块A：演化叙事引擎
+
+不是事件日志——是**叙事**。把事件串成"你曾经认为X→因为Y发生了→你修正为Z"的故事。
+
+叙事生成逻辑：事件聚类→因果链重建→叙事合成→意义标注（progressive_deepening/oscillation/paradigm_shift/gradual_erosion/sudden_crystallization）
+
+#### 模块B：趋势预测引擎
+
+在原则被正式修改前发现征兆。6种预测信号：
+
+| 信号 | 检测方式 | 预测含义 |
+|------|---------|---------|
+| 偏离加速 | 连续3周期deviation_rate上升 | PP可能即将修订/退役 |
+| 反例聚集 | 30天负向比例突升 | PP前提可能正在失效 |
+| 使用衰减 | 90天触发下降>50% | 可能已隐含放弃 |
+| 替代行为涌现 | 新模式与某PP重叠但方向不同 | 新DP正在取代旧PP |
+| 假说反超 | 某假说验证分数超过同域PP | 假说可能比现行原则更可靠 |
+| 元原则松动 | 某MP下多条PP同时张力/偏离 | MP本身需重新审视 |
+
+价值：把"原则开始过时→你终于修改"的认知滞后从3-6个月压缩到2-4周。
+
+#### 模块C：身份内核检测器
+
+操作定义：身份内核 = 从未修改核心逻辑的原则 + 从未偏离的规范性原则 + 无论条件如何变化都一致的行为倾向。**不是你"声称"不变的，是数据证明确实没变的。**
+
+```yaml
+identity_core:
+  stable_principles:
+    - id: "MP-001"
+      stable_since: "2026-05-20"
+      stability_days: 480
+      assessment: "deep_conviction"
+  stable_patterns:
+    - description: "偏向帮助他人"
+      assessment: "identity_trait"
+  stable_values:
+    - statement: "体验多样性>物质积累"
+      assessment: "core_value"
+  core_health:
+    total_stable_elements: 8
+    assessment: "healthy"
+    # healthy: 5-15条 | too_rigid: >20条 | too_fluid: <3条
+```
+
+**内核警报（最高优先级）：** 当稳定480天的元素突然出现偏离——不是普通张力，是地基松动。系统呈现两种可能："极端期例外（需设退出条件）" vs "被外部压力无意识侵蚀（需立即干预）"。
+
+#### "成长vs漂移"区分
+
+| 维度 | 成长特征 | 漂移特征 |
+|------|---------|---------|
+| 驱动力 | 有明确触发事件 | "不知道什么时候开始的" |
+| 方向性 | 精确化或深化 | 模糊化或放弃 |
+| 意识度 | 你知道自己变了且能解释 | 系统指出后才发现 |
+| 一致性 | 与内核不冲突 | 与内核产生新张力 |
+
+#### 报告体系
+
+- **月度报告**：数据统计+最重要变化+趋势预测+内核确认
+- **季度报告**：+跨领域模式+结构性变化+3月前对比+退役回顾
+- **年度报告**：+认知演化路径可视化（阶段划分）+最大转变+内核年审+反思问题
+
+---
+
+### 补充点4：维度体系设计 → 关联：Layer 0 / Layer 2 / Layer 5
+
+#### 问题本质
+
+维度是系统的"语义路由表"——决定哪些决策被认为是"同一类"。太粗=伪模式，太细=永远积累不到5条，太死=现实不在列表里，太活=语义漂移。
+
+#### 设计：三层结构
+
+```
+第一层：维度域（Domain）— 预设≤10个 — 最粗归类，几乎不变
+  例：时间分配/金钱资源/关系社交/职业方向/学习成长/健康生存/创作表达/决策方法论
+
+第二层：维度轴（Axis）— 半涌现 — Domain内的具体张力轴
+  例（时间分配域内）：深度vs碎片 / 当前任务vs新机会 / 为自己vs为他人 / 休息vs产出
+
+第三层：情境标签（Context Tag）— 完全涌现 — 不标准化，只用于检索匹配不用于分析
+  例："兼职""外包""加班""周末学习"
+```
+
+**聚类和模式发现只用第一层和第二层。第三层只用于检索。** 防止"情境标签太多导致每条决策独一无二"。
+
+#### 维度轴涌现机制
+
+触发条件：某Domain内≥8条决策 + ≥4条的stated_reason出现相似权衡逻辑 + 该逻辑不匹配已有Axis + 选择方向不一致
+
+→ 系统推出候选Axis → 用户确认 → 正式加入 → 回溯重标记
+
+#### 语义匹配（关键难题）
+
+**不依赖关键词匹配，依赖"选择结构"匹配。**
+
+两条决策"同一维度"的判定标准：面对的权衡结构相似（[放弃什么类型价值, 获得什么类型价值]）。
+
+双通道匹配：
+- 通道1（高权重）：结构匹配——提取implied_tradeoffs → 抽象类型 → 匹配Axis
+- 通道2（辅助）：语义相似度验证
+- 最终：双通道交叉验证
+
+#### 去重与合并
+
+合并条件：决策集合重叠>70% + 方向高度一致 + 用户确认
+合并执行：创建新Axis → 旧两条标记"已合并" → 历史重标记 → 模式引擎重跑
+
+#### 冷启动
+
+- 前10天：预设3-5个Domain + 每个1-2个种子Axis + 先标Domain待积累
+- 第11-20天：Domain内5+条决策 → 尝试Axis匹配
+- 第21-30天：第一批涌现Axis可能出现
+
+---
+
+### 补充点5：试金石库假说化质量标准 → 关联：Layer 1
+
+#### TFRF四维质量框架
+
+| 维度 | 检验问题 | 3分 | 0分 |
+|------|---------|-----|-----|
+| T-Trigger | 什么场景想起它？ | 有场景+进入条件+排除条件 | 无触发("永远适用"=永远想不起) |
+| F-Falsifiability | 什么结果能证明它错？ | 有明确失败条件 | 不可证伪→转value_orientation |
+| R-Resolution | 能在几次决策中验证？ | ≤5次, ≤90天 | 不可在有限决策中验证 |
+| F-Fidelity | 格式化后是否忠实原始逻辑？ | 保留核心推导+关键条件 | 歪曲原意 |
+
+总分12分：A(10-12)直接入主动匹配池 / B(7-9)可用标记改进空间 / C(4-6)入库但不主动匹配 / D(0-3)建议转通道或重写
+
+#### X和Y的颗粒度控制
+
+**X（触发）黄金颗粒度：** 每月出现1-3次的场景类型。太粗=等于没触发，太细=验证周期太长。
+
+**Y（行为指引）黄金颗粒度：** 告诉你"做什么类型的选择"而非"做哪个具体选择"。
+
+模板：
+- "选择[选项类型A]而非[选项类型B]"
+- "在[具体步骤]之后再做决定，而非立即行动"
+- "把[资源X]投在[方向类型]而非[方向类型]"
+
+#### 自检机制
+
+- **即时自检**：格式化完成后自动TFRF评分。C级以下呈现改进建议但不阻断入库
+- **验证失败时回溯**：区分"假说本身错"vs"格式化丢了关键信息"
+- **月度库扫描**：D级建议处理 / C级>60天未精炼建议降级 / 来源平均分趋势
+
+#### 特殊情况
+
+- 不可证伪→标记value_orientation走另一条通道
+- 一条输入含多个判断→建议拆分为假说群（标记relationships.supports）
+- 假说层级：framework(框架级,间接验证) / derived(推导,可直接验证) / instance(实例化,最快验证)
+- 子假说验证结果向上传递给框架级假说
+
+---
+
+### 补充点6：系统可读性设计 → 关联：全局
+
+#### 六大可读性机制
+
+**机制1：三层视图（Dashboard→Map→Detail）**
+- Dashboard：10秒概览——system_health + top_attention(≤3) + core_anchor
+- Map：结构化全景——原则地图（每个MP下的子原则状态/张力/活跃度）
+- Detail：按需钻入任何节点的完整数据
+
+**机制2：可解释性追踪链**
+系统每个输出都附带完整reasoning_steps，用户可逐步追问"为什么"直到满意。用户可在任何step上override（系统从该步重新推理）。
+
+**机制3：确认度标记**
+每条信息标记：system_inferred / user_glanced / user_confirmed / user_deeply_reviewed + staleness(fresh/aging/stale)
+
+**机制4：注意力预算**
+- 每日最多3条推送
+- 每周review预算30分钟
+- 复杂度上限：active原则>50条→触发压缩建议（合并/降级/归纳/层级化）
+
+**机制5：Override Protocol**
+你可以覆盖系统任何判断，系统不反驳不追问。但连续覆盖同类>5次→轻声问一次"要不要调整系统逻辑？"→然后不再问。
+
+**机制6：月度Sync Ritual（15-20min）**
+1. 确认内核（3min）：系统呈现不变内核→你确认
+2. 审视变化（5min）：本月3个最重要变化→你确认/质疑
+3. 抽检理解（5min）：随机抽2条本月使用的原则→展示使用逻辑→你确认/纠正
+4. 复杂度检查（2min）：当前指标→觉得可控/太多
+
+---
+
+### 补充点7：原则的情境依赖与有效性衰减 → 关联：Layer 3 / Layer 6
+
+#### 正确模型：不是线性时间衰减，是情境相变跳转
+
+原则有效性受三个独立变量影响：时间距离 / 情境距离 / 你自身的距离。单纯时间衰减是错误模型。
+
+**有效性状态模型：**
+```
+情境不变 → VALID(高置信) 
+→ 情境重大变化 → SUSPENDED(存疑,需re-validation) 
+→ 新情境验证仍成立 → RE-VALID(跨情境稳定) 
+→ 需要修订 → REVISED 
+→ 不再适用 → RETIRED
+```
+
+#### 情境锚点
+
+每条validation记录附带context_snapshot（life_stage/financial_state/time_freedom/responsibility_level/primary_role）
+
+context_distance = 当前情境 vs 验证时情境的加权差异。distance>0.5的原则→SUSPENDED
+
+#### 情境相变检测
+
+- **显式**：用户声明"我毕业了/工作了/搬城市了" → 扫描所有原则 → 标记distance>0.5为SUSPENDED → 呈现哪些需re-validation
+- **隐式**：系统从数据中推断（time_pressure分布突变/新维度出现/financial维度频率×3）→ 轻量询问
+
+#### Re-validation机制
+
+不是单独任务——嵌入正常使用。原则下次自然触发时附带情境提醒："这条在不同条件下验证过。请确认当前前提是否满足。"
+
+---
+
+### 补充点8：系统自主学习机制 → 关联：新增机制（跨全层）
+
+#### 核心洞察
+
+你看信息源提取"对我决策有什么用"（内容层面）→产出假说。
+系统看同一信息源提取"这个思考框架能不能优化我的运行逻辑"（元层面）→产出系统更新提案。
+
+同一输入源，两条完全不同的处理管线。
+
+#### 系统关注的五类知识
+
+| 类型 | 找什么 | 示例 |
+|------|--------|------|
+| 思维框架 | 改进模式识别/推理逻辑 | OODA循环、贝叶斯更新 |
+| 决策方法论 | 升级L5推理引擎 | 预设验尸法、10/10/10法则 |
+| 认知偏误研究 | 加入盲区扫描 | 新发现的偏误和去偏方法 |
+| 系统设计模式 | 优化架构本身 | 反脆弱设计、渐进复杂度管理 |
+| 前沿研究 | 决策科学新发现 | 特定条件下某策略更优的实证 |
+
+#### 系统更新提案（System Update Proposal）
+
+```yaml
+system_update_proposal:
+  id: "SU-014"
+  source: {input_id, person, platform, content}
+  discovery:
+    type: "decision_methodology|cognitive_bias|thinking_framework|system_design|frontier_research"
+    summary: "一句话发现"
+  proposal:
+    target_layer: "L5"
+    target_component: "blind_spot_scan"
+    current_state: "当前状态"
+    proposed_change: "变更方案"
+    change_type: "addition|modification|replacement|removal"
+  reasoning:
+    why_this_matters: "为什么重要"
+    expected_benefit: "预期收益"
+    potential_risk: "潜在风险"
+    risk_mitigation: "风险缓解"
+  impact:
+    scope: "minor|moderate|major|structural"
+    backward_compatible: true/false
+  approval:
+    status: "pending|approved|rejected|deferred|partially_approved"
+```
+
+#### 生成逻辑
+
+不是每条输入都产生提案。系统管线只在检测到信号时激活：
+- 内容含"方法论/框架/系统/过程"类？
+- 逻辑可抽象为通用决策/分析模式？
+- 涉及认知科学/行为经济学实证？
+- 与系统已知缺陷/边界相关？
+
+自检标准（≥2条通过才入队）：可操作性 / 问题对应性 / 非冗余性 / 复杂度可控
+
+#### 通知与审批
+
+每日通知（如有）：展示发现+用在哪+更新前后差异+论证+风险。你决定：批准/修改/拒绝/延后/讨论。
+
+#### 边界控制
+
+```yaml
+auto_learning_constraints:
+  max_proposals_per_week: 3
+  max_pending_updates: 5
+  max_monthly_approved: 4
+  post_update_observation: 14天
+  all_updates_reversible: true
+```
+
+#### 系统Changelog
+
+每条更新记入版本历史。5年后可看到"系统本身从v1.0到v15.0的方法论演化史"。
+
+---
+
+### 设计完整性确认
+
+截至本次设计会话结束，已完成设计的组件：
+
+| 组件 | 状态 | 设计深度 |
+|------|------|---------|
+| Layer 0 决策日志 | ✓完成 | 数据结构+流水线+触发+边界 |
+| Layer 1 试金石库 | ✓完成 | 数据结构+流水线+升级+批量+健康度+质量标准(TFRF) |
+| Layer 2 模式引擎 | ✓完成 | 模式类型+数据结构+运行时机+扫描逻辑+边界 |
+| Layer 3 原则层 | ✓完成 | 类型+数据结构+层级+4通道+冲突裁决+复查+退役 |
+| Layer 4 张力检测器 | ✓完成 | 4种类型+数据结构+检测逻辑+呈现+响应+生命周期+健康度 |
+| Layer 5 决策辅助层 | ✓完成 | 4阶段架构+场景解构(含时间维度)+原则召回+论证合成+盲区扫描+quick_test |
+| Layer 6 演化追踪层 | ✓完成 | 3模块(叙事+预测+内核)+演化事件+报告体系+成长vs漂移 |
+| 维度体系 | ✓完成 | 三层结构+涌现+语义匹配+去重+冷启动 |
+| 假说化质量标准 | ✓完成 | TFRF框架+颗粒度+自检+特殊情况 |
+| 系统可读性 | ✓完成 | 6大机制(视图/追踪链/确认度/预算/override/仪式) |
+| 情境衰减 | ✓完成 | 状态模型+情境锚点+相变检测+re-validation |
+| 系统自主学习 | ✓完成 | 双管线+5类知识+提案结构+生成逻辑+审批+边界 |
+| 交互设计(7场景) | ✓完成 | 触发+输入+处理+输出模板 |
+| 信任圈机制 | ✓完成 | 日常沉淀+Lifeline+口子预留 |
+| 冷启动30天 | ✓完成 | 3阶段执行计划 |
+
+---
+
+*深化补充结束。本文档为Personal Principle OS的完整产品设计文档v0.2。*
